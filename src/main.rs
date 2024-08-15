@@ -511,7 +511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 attempts += 1;
-                                if attempts > 9 {
+                                if attempts > 20 {
                                     println!("{}: Max retries", "ERROR".bold().red());
                                     break;
                                 }
