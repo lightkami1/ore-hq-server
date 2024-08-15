@@ -400,8 +400,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_nonce = nonce_ext.clone();
     let app_prio_fee = Arc::new(Mutex::new(0)); 
     let prio_fee = *app_prio_fee.lock().await; 
-    let jito_tip_sol = (prio_fee as f64) / 1_000_000_000.0; 
     let jito_tip_lamports = *priority_fee.lock().await;
+    let jito_tip_sol = (jito_tip_lamports as f64) / 1_000_000_000.0; 
     let keypair = read_keypair_file("/root/.config/solana/id1.json")
         .expect("Failed to read keypair from /root/.config/solana/id1.json");
 
