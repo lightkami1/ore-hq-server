@@ -1,4 +1,5 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddr, ops::{ControlFlow, Div, Mul}, path::Path, str::FromStr, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use colored::Colorize;
 
 use axum::{extract::{ws::{Message, WebSocket}, ConnectInfo, Query, State, WebSocketUpgrade}, http::StatusCode, response::IntoResponse, routing::get, Extension, Router};
 use axum_extra::{headers::authorization::Basic, TypedHeader};
@@ -8,21 +9,33 @@ use futures::{stream::SplitSink, SinkExt, StreamExt};
 use ore_api::{consts::BUS_COUNT, state::Proof};
 use ore_utils::{get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, ORE_TOKEN_DECIMALS};
 use rand::Rng;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::{commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, native_token::LAMPORTS_PER_SOL, pubkey::Pubkey, signature::{read_keypair_file, Signature}, signer::Signer, transaction::Transaction};
-use tokio::{io::AsyncReadExt, sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock}};
+use rand::seq::SliceRandom;
+use solana_client::client_error::reqwest;
+use solana_client::client_error::reqwest::header::{CONTENT_TYPE, HeaderMap};
+use solana_sdk::{commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, native_token::LAMPORTS_PER_SOL, pubkey, pubkey::Pubkey, signature::{read_keypair_file, Signature}, signer::Signer, transaction::Transaction};
+use tokio::{io::AsyncReadExt, sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock}, time};
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use solana_transaction_status::{Encodable, EncodedTransaction, TransactionConfirmationStatus, UiTransactionEncoding};
 
+use solana_program::{
+    instruction::Instruction,
+    native_token::{lamports_to_sol, sol_to_lamports},
+    system_instruction::transfer,
+};
+
+use serde_json::{json, Value};
+use eyre::{Report, Result};
 
 const MIN_DIFF: u32 = 8;
 const MIN_HASHPOWER: u64 = 5;
 
 
 struct AppState {
-    sockets: HashMap<SocketAddr, Mutex<SplitSink<WebSocket, Message>>>
+    sockets: HashMap<SocketAddr, Mutex<SplitSink<WebSocket, Message>>>,
 }
 
 pub struct MessageInternalMineSuccess {
@@ -35,7 +48,7 @@ pub struct MessageInternalMineSuccess {
 pub enum ClientMessage {
     Ready(SocketAddr),
     Mining(SocketAddr),
-    BestSolution(SocketAddr, Solution)
+    BestSolution(SocketAddr, Solution),
 }
 
 pub struct BestHash {
@@ -48,6 +61,145 @@ pub struct Config {
 }
 
 mod ore_utils;
+
+pub const JITO_RECIPIENTS: [Pubkey; 8] = [
+    // mainnet
+    pubkey!("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"),
+    pubkey!("HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe"),
+    pubkey!("Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY"),
+    pubkey!("ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49"),
+    pubkey!("DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh"),
+    pubkey!("ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt"),
+    pubkey!("DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL"),
+    pubkey!("3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"),
+];
+
+pub const JITO_ENDPOINTS: [&str; 4] = [
+    "https://mainnet.block-engine.jito.wtf",
+    "https://amsterdam.mainnet.block-engine.jito.wtf",
+    "https://ny.mainnet.block-engine.jito.wtf",
+    "https://tokyo.mainnet.block-engine.jito.wtf",
+];
+
+
+// jito submit
+#[derive(Deserialize, Serialize, Debug)]
+struct BundleSendResponse {
+    id: u64,
+    jsonrpc: String,
+    result: String,
+}
+
+// jito query
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BundleStatusResponse {
+    jsonrpc: String,
+    result: BundleStatusResult,
+    id: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BundleStatusResult {
+    context: Context,
+    value: Vec<BundleStatus>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Context {
+    slot: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BundleStatus {
+    bundle_id: String,
+    transactions: Vec<String>,
+    slot: u64,
+    confirmation_status: String,
+    err: Option<serde_json::Value>,
+}
+
+
+async fn get_bundle_statuses(params: Value) -> Result<BundleStatusResponse> {
+    // 在 async 块外生成随机数
+    let endpoint = JITO_ENDPOINTS[rand::thread_rng().gen_range(0..JITO_ENDPOINTS.len())].to_string() + "/api/v1/bundles";
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))  // 设置超时为3秒
+        .build()?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+    let response = client
+        .post(endpoint)  // 使用预先生成的随机 endpoint
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBundleStatuses",
+            "params": params
+        }))
+        .send()
+        .await
+        .map_err(|err| eyre::eyre!("Failed to send request: {err}"))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|err| eyre::eyre!("Failed to read response content: {err:#}"))?;
+
+    if !status.is_success() {
+        eyre::bail!("Status code: {status}, response: {text}");
+    }
+
+    serde_json::from_str(&text)
+        .map_err(|err| eyre::eyre!("Failed to deserialize response: {err:#}, response: {text}, status: {status}"))
+}
+
+pub fn build_bribe_ix(pubkey: &Pubkey, value: u64) -> solana_sdk::instruction::Instruction {
+    solana_sdk::system_instruction::transfer(pubkey, &JITO_RECIPIENTS[rand::thread_rng().gen_range(0..JITO_RECIPIENTS.len())], value)
+}
+
+async fn send_jito_bundle(params: Value) -> Result<BundleSendResponse> {
+    // 在 async 块外生成随机数
+    let endpoint = JITO_ENDPOINTS[rand::thread_rng().gen_range(0..JITO_ENDPOINTS.len())].to_string() + "/api/v1/bundles";
+    
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))  // 设置超时为5秒
+        .build()?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+    let response = client
+        .post(endpoint)  // 使用预先生成的随机 endpoint
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendBundle",
+            "params": params
+        }))
+        .send()
+        .await
+        .map_err(|err| eyre::eyre!("Failed to send request: {err}"))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|err| eyre::eyre!("Failed to read response content: {err:#}"))?;
+
+    if !status.is_success() {
+        eyre::bail!("Status code: {status}, response: {text}");
+    }
+
+    serde_json::from_str(&text)
+        .map_err(|err| eyre::eyre!("Failed to deserialize response: {err:#}, response: {text}, status: {status}"))
+}
+
 
 #[derive(Parser, Debug)]
 #[command(version, author, about, long_about = None)]
@@ -122,7 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let result = rpc_client
                 .send_and_confirm_transaction_with_spinner_and_commitment(
-                    &tx, rpc_client.commitment()
+                    &tx, rpc_client.commitment(),
                 ).await;
 
             if let Ok(sig) = result {
@@ -145,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let best_hash = Arc::new(Mutex::new(BestHash {
         solution: None,
-        difficulty: 0
+        difficulty: 0,
     }));
 
     let wallet_extension = Arc::new(wallet);
@@ -175,7 +327,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_nonce = nonce_ext.clone();
     tokio::spawn(async move {
         loop {
-
             let mut clients = Vec::new();
             {
                 let ready_clients_lock = ready_clients.lock().await;
@@ -247,7 +398,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_best_hash = best_hash.clone();
     let app_wallet = wallet_extension.clone();
     let app_nonce = nonce_ext.clone();
-    let app_prio_fee = priority_fee.clone();
+    let app_prio_fee = Arc::new(Mutex::new(0)); 
+    let prio_fee = *app_prio_fee.lock().await; 
+    let jito_tip_sol = (prio_fee as f64) / 1_000_000_000.0; 
+    let jito_tip_lamports = *priority_fee.lock().await;
+    let keypair = read_keypair_file("/root/.config/solana/id1.json")
+        .expect("Failed to read keypair from /root/.config/solana/id1.json");
+
+
     tokio::spawn(async move {
         loop {
             let proof = {
@@ -267,12 +425,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let prio_fee = {
                         app_prio_fee.lock().await.clone()
                     };
-                    
+
                     let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(480000);
                     ixs.push(cu_limit_ix);
 
                     let prio_fee_ix = ComputeBudgetInstruction::set_compute_unit_price(prio_fee);
                     ixs.push(prio_fee_ix);
+
+                    // 添加Jito tip转账指令
+                    ixs.push(build_bribe_ix(&app_wallet.pubkey(), jito_tip_lamports));
+
+                    
+                    println!("Jito tip: {} SOL", jito_tip_sol);
 
                     let noop_ix = get_auth_ix(signer.pubkey());
                     ixs.push(noop_ix);
@@ -288,16 +452,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut tx = Transaction::new_with_payer(&ixs, Some(&signer.pubkey()));
 
                         tx.sign(&[&signer], hash);
-                        
+
+                        let mut bundle_confirm = false;
                         for i in 0..3 {
                             info!("Sending signed tx...");
                             info!("attempt: {}", i + 1);
-                            let sig = rpc_client.send_and_confirm_transaction(&tx).await;
-                            if let Ok(sig) = sig {
-                                // success
-                                info!("Success!!");
-                                info!("Sig: {}", sig);
-                                // update proof
+
+                            let mut bundle = Vec::with_capacity(5);
+                            bundle.push(tx.clone());
+
+                            let _ = *bundle
+                                .first()
+                                .expect("empty bundle")
+                                .signatures
+                                .first()
+                                .expect("empty transaction");
+
+                            let bundle = bundle
+                                .into_iter()
+                                .map(|tx| match tx.encode(UiTransactionEncoding::Binary) {
+                                    EncodedTransaction::LegacyBinary(b) => b,
+                                    _ => panic!("encode-jito-tx-err"),
+                                })
+                                .collect::<Vec<_>>();
+
+                            println!("Submitting jito transaction... (attempt {})", i);
+                            let mut bundle_id = String::new();
+                            match send_jito_bundle(json!([bundle])).await {
+                                Ok(resp) => {
+                                    bundle_id = resp.result.clone();
+                                    println!("Sent bundle resp: {:?}", bundle_id);
+                                }
+                                // Handle submit errors
+                                Err(err) => {
+                                    println!("Sent bundle err: {:?}", err);
+                                    time::sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            }
+
+                            let mut attempts = 0;
+                            loop {
+                                println!("query bundle bundle_id: {}, attempts: {}", bundle_id, attempts);
+                                // Retry
+                                let param = bundle_id.clone();
+                                match get_bundle_statuses(json!([[param]])).await {
+                                    Ok(resp) => {
+                                        if resp.result.value.len() > 0 && resp.result.value[0].confirmation_status == "confirmed" {
+                                            println!(" Bundle landed successfully");
+                                            println!(" https://solscan.io/tx/{}?cluster={}", resp.result.value[0].transactions[0], "mainnet");
+                                            bundle_confirm = true;
+                                            break;
+                                        }
+                                    }
+                                    // Handle submit errors
+                                    Err(err) => {
+                                        println!("{}", err);
+                                    }
+                                }
+                                attempts += 1;
+                                if attempts > 9 {
+                                    println!("{}: Max retries", "ERROR".bold().red());
+                                    break;
+                                }
+                                time::sleep(Duration::from_secs(1)).await;
+                            }
+
+                            
+                            if bundle_confirm {
+                                // 成功上链，执行状态更新和任务分发
                                 loop {
                                     if let Ok(loaded_proof) = get_proof(&rpc_client, signer.pubkey()).await {
                                         if proof != loaded_proof {
@@ -311,53 +534,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let _ = mine_success_sender.send(MessageInternalMineSuccess {
                                                 difficulty,
                                                 total_balance: balance,
-                                                rewards
+                                                rewards,
                                             });
-
+    
                                             {
                                                 let mut mut_proof = app_proof.lock().await;
                                                 *mut_proof = loaded_proof;
-                                                break;
+                                                let mut nonce = app_nonce.lock().await;
+                                                *nonce = 0;
+                                                let mut mut_best_hash = app_best_hash.lock().await;
+                                                mut_best_hash.solution = None;
+                                                mut_best_hash.difficulty = 0;
                                             }
+                                            break;
                                         }
                                     } else {
                                         tokio::time::sleep(Duration::from_millis(500)).await;
                                     }
                                 }
-                                // reset nonce
-                                {
-                                    let mut nonce = app_nonce.lock().await;
-                                    *nonce = 0;
-                                }
-                                // reset best hash
-                                {
-                                    info!("reset best hash");
-                                    let mut mut_best_hash = app_best_hash.lock().await;
-                                    mut_best_hash.solution = None;
-                                    mut_best_hash.difficulty = 0;
-                                }
                                 break;
-                            } else {
-                                // sent error
-                                if i >= 2 {
-                                    info!("Failed to send after 3 attempts. Discarding and refreshing data.");
-                                    // reset nonce
-                                    {
-                                        let mut nonce = app_nonce.lock().await;
-                                        *nonce = 0;
-                                    }
-                                    // reset best hash
-                                    {
-                                        info!("reset best hash");
-                                        let mut mut_best_hash = app_best_hash.lock().await;
-                                        mut_best_hash.solution = None;
-                                        mut_best_hash.difficulty = 0;
-                                    }
-                                    break;
-                                }
                             }
+
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         }
+                        
+                    
                     } else {
                         error!("Failed to get latest blockhash. retrying...");
                         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -383,8 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let shared_state = app_shared_state.read().await;
                     for (_socket_addr, socket_sender) in shared_state.sockets.iter() {
-                        if let Ok(_) = socket_sender.lock().await.send(Message::Text(message.clone())).await {
-                        } else {
+                        if let Ok(_) = socket_sender.lock().await.send(Message::Text(message.clone())).await {} else {
                             println!("Failed to send client text");
                         }
                     }
@@ -418,12 +618,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         ping_check_system(&app_shared_state).await;
     });
-    
+
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>()
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     ).await
-    .unwrap();
+        .unwrap();
 
     Ok(())
 }
@@ -436,7 +636,6 @@ async fn ws_handler(
     Extension(client_channel): Extension<UnboundedSender<ClientMessage>>,
     Extension(config): Extension<Arc<Mutex<Config>>>,
 ) -> impl IntoResponse {
-
     let password = auth_header.password();
     if config.lock().await.password.ne(password) {
         error!("Auth failed..");
@@ -484,7 +683,7 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
     match msg {
         Message::Text(t) => {
             println!(">>> {who} sent str: {t:?}");
-        },
+        }
         Message::Binary(d) => {
             // first 8 bytes are message type
             let message_type = d[0];
@@ -492,11 +691,11 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
                 0 => {
                     let msg = ClientMessage::Ready(who);
                     let _ = client_channel.send(msg);
-                },
+                }
                 1 => {
                     let msg = ClientMessage::Mining(who);
                     let _ = client_channel.send(msg);
-                },
+                }
                 2 => {
                     // parse solution from message data
                     let mut solution_bytes = [0u8; 16];
@@ -517,13 +716,12 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
 
                     let msg = ClientMessage::BestSolution(who, solution);
                     let _ = client_channel.send(msg);
-                },
+                }
                 _ => {
                     println!(">>> {} sent an invalid message", who);
                 }
             }
-
-        },
+        }
         Message::Close(c) => {
             if let Some(cf) = c {
                 println!(
@@ -533,14 +731,14 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
             } else {
                 println!(">>> {who} somehow sent close message without CloseFrame");
             }
-            return ControlFlow::Break(())
-        },
+            return ControlFlow::Break(());
+        }
         Message::Pong(v) => {
             //println!(">>> {who} sent pong with {v:?}");
-        },
+        }
         Message::Ping(v) => {
             //println!(">>> {who} sent ping with {v:?}");
-        },
+        }
     }
 
     ControlFlow::Continue(())
@@ -551,7 +749,7 @@ async fn client_message_handler_system(
     shared_state: &Arc<RwLock<AppState>>,
     ready_clients: Arc<Mutex<HashSet<SocketAddr>>>,
     proof: Arc<Mutex<Proof>>,
-    best_hash: Arc<Mutex<BestHash>>
+    best_hash: Arc<Mutex<BestHash>>,
 ) {
     while let Some(client_message) = receiver_channel.recv().await {
         match client_message {
@@ -565,16 +763,15 @@ async fn client_message_handler_system(
                             ready_clients.insert(addr);
                         }
 
-                        if let Ok(_) = sender.lock().await.send(Message::Text(String::from("Client successfully added."))).await {
-                        } else {
+                        if let Ok(_) = sender.lock().await.send(Message::Text(String::from("Client successfully added."))).await {} else {
                             println!("Failed notify client they were readied up!");
                         }
                     }
                 }
-            },
+            }
             ClientMessage::Mining(addr) => {
                 println!("Client {} has started mining!", addr.to_string());
-            },
+            }
             ClientMessage::BestSolution(addr, solution) => {
                 println!("Client {} found a solution.", addr);
                 let challenge = {
@@ -629,7 +826,7 @@ async fn ping_check_system(
         // remove any sockets where ping failed
         let mut app_state = shared_state.write().await;
         for address in failed_sockets {
-             app_state.sockets.remove(&address);
+            app_state.sockets.remove(&address);
         }
         drop(app_state);
 
