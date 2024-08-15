@@ -486,7 +486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Handle submit errors
                                 Err(err) => {
                                     println!("Sent bundle err: {:?}", err);
-                                    time::sleep(Duration::from_secs(1)).await;
+                                    time::sleep(Duration::from_secs(3)).await;
                                     continue;
                                 }
                             }
