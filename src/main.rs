@@ -462,7 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 添加Jito tip转账指令,难度>20增加小费
                     ixs.push(build_bribe_ix(&app_wallet.pubkey(), adjust_fee(difficulty, jito_tip_lamports)));
                     if difficulty < 21 {
-                        info!("JITO TIP: {} SOL", jito_tip_sol);
+                        info!("JITO TIP: {} ", jito_tip_lamports);
                     }
                     
 
