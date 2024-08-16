@@ -461,8 +461,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // 添加Jito tip转账指令,难度>20增加小费
                     ixs.push(build_bribe_ix(&app_wallet.pubkey(), adjust_fee(difficulty, jito_tip_lamports)));
-                    if difficulty < 2 {
-                        println!("Jito tip: {} SOL", jito_tip_sol);
+                    if difficulty < 21 {
+                        info!("JITO TIP: {} SOL", jito_tip_sol);
                     }
                     
 
@@ -504,7 +504,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Handle submit errors
                                 Err(err) => {
                                     info!("Sent bundle err: {:?}", err);
-                                    time::sleep(Duration::from_secs(3)).await;
+                                    time::sleep(Duration::from_secs(1)).await;
                                     continue;
                                 }
                             }
@@ -530,7 +530,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 attempts += 1;
                                 
-                                if attempts > 20 {
+                                if attempts > 8 {
                                     info!("{}: 超过最大尝试次数", "ERROR".bold().red());
                                     if i == 2 {
                                         // 达到最大后重新分配避免卡死
