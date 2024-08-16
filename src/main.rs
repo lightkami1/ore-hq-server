@@ -1,6 +1,14 @@
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, ops::{ControlFlow, Div, Mul}, path::Path, str::FromStr, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::{HashMap, HashSet},
+    io::{self, Write},
+    net::SocketAddr,
+    ops::{ControlFlow, Div, Mul},
+    path::Path,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use colored::Colorize;
-
 use axum::{extract::{ws::{Message, WebSocket}, ConnectInfo, Query, State, WebSocketUpgrade}, http::StatusCode, response::IntoResponse, routing::get, Extension, Router};
 use axum_extra::{headers::authorization::Basic, TypedHeader};
 use clap::Parser;
@@ -8,27 +16,27 @@ use drillx::Solution;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
 use ore_api::{consts::BUS_COUNT, state::Proof};
 use ore_utils::{get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, ORE_TOKEN_DECIMALS};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use solana_client::nonblocking::rpc_client::RpcClient;
-use rand::seq::SliceRandom;
-use solana_client::client_error::reqwest;
-use solana_client::client_error::reqwest::header::{CONTENT_TYPE, HeaderMap};
+use rand::{Rng, seq::SliceRandom};
+use solana_client::{
+    client_error::reqwest::{self, header::{CONTENT_TYPE, HeaderMap}},
+    nonblocking::rpc_client::RpcClient,
+};
 use solana_sdk::{commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, native_token::LAMPORTS_PER_SOL, pubkey, pubkey::Pubkey, signature::{read_keypair_file, Signature}, signer::Signer, transaction::Transaction};
-use tokio::{io::AsyncReadExt, sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock}, time};
-use tower_http::trace::{DefaultMakeSpan, TraceLayer};
-use tracing::{error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use solana_transaction_status::{Encodable, EncodedTransaction, TransactionConfirmationStatus, UiTransactionEncoding};
-
 use solana_program::{
     instruction::Instruction,
     native_token::{lamports_to_sol, sol_to_lamports},
     system_instruction::transfer,
 };
-
+use tokio::{io::AsyncReadExt, sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock}, time};
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
+use tracing::{error, info};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use serde_json::{json, Value};
 use eyre::{Report, Result};
+
+
 
 const MIN_DIFF: u32 = 8;
 const MIN_HASHPOWER: u64 = 5;
@@ -211,7 +219,7 @@ pub fn adjust_fee(difficulty: u32, jito_tip_lamports: u64) -> u64 {
         if extra_fee > 5 * jito_tip_lamports {
             extra_fee = 5 * jito_tip_lamports;
         }
-        info!("TIP增加到 {}", extra_fee);
+        info!("JITO TIP增加到 {}", extra_fee);
     }
         else if difficulty > 20 {
             extra_fee += (extra_fee as f64 * (difficulty as f64 - 20f64) / 20f64) as u64 * 4;
@@ -219,7 +227,7 @@ pub fn adjust_fee(difficulty: u32, jito_tip_lamports: u64) -> u64 {
             if extra_fee > 3 * jito_tip_lamports {
                 extra_fee = 3 * jito_tip_lamports
             }
-            info!("TIP增加到 {}", extra_fee);
+            info!("JITO TIP增加到 {}", extra_fee);
         }
     return extra_fee;
 }
@@ -258,27 +266,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wallet_path = Path::new(&wallet_path_str);
 
     if !wallet_path.exists() {
-        tracing::error!("Failed to load wallet at: {}", wallet_path_str);
-        return Err("Failed to find wallet path.".into());
+        tracing::error!("加载钱包失败: {}", wallet_path_str);
+        return Err("找不到钱包路径".into());
     }
 
     let wallet = read_keypair_file(wallet_path).expect("Failed to load keypair from file: {wallet_path_str}");
-    println!("loaded wallet {}", wallet.pubkey().to_string());
+    println!("加载钱包: {}", wallet.pubkey().to_string());
 
-    println!("establishing rpc connection...");
+    println!("建立rpc连接...");
     let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
 
-    println!("loading sol balance...");
+    println!("查询sol余额");
     let balance = if let Ok(balance) = rpc_client.get_balance(&wallet.pubkey()).await {
         balance
     } else {
-        return Err("Failed to load balance".into());
+        return Err("查询sol余额失败".into());
     };
 
-    println!("Balance: {:.2}", balance as f64 / LAMPORTS_PER_SOL as f64);
+    println!("sol余额: {:.2}", balance as f64 / LAMPORTS_PER_SOL as f64);
 
     if balance < 1_000_000 {
-        return Err("Sol balance is too low!".into());
+        return Err("sol余额过低!".into());
     }
 
     let proof = if let Ok(loaded_proof) = get_proof(&rpc_client, wallet.pubkey()).await {
@@ -469,7 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let ix_mine = get_mine_ix(signer.pubkey(), solution, bus);
                     ixs.push(ix_mine);
-                    info!("Starting mine submission attempts with difficulty {}.", difficulty);
+                    info!("开始提交难度：{}.", difficulty);
                     if let Ok((hash, _slot)) = rpc_client.get_latest_blockhash_with_commitment(rpc_client.commitment()).await {
                         let mut tx = Transaction::new_with_payer(&ixs, Some(&signer.pubkey()));
 
@@ -477,8 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let mut bundle_confirm = false;
                         for i in 0..3 {
-                            info!("Sending signed tx...");
-                            info!("attempt: {}", i + 1);
+                            info!("提交jito交易... (循环次数: {})", i + 1);
 
                             let mut bundle = Vec::with_capacity(5);
                             bundle.push(tx.clone());
@@ -498,16 +505,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                                 .collect::<Vec<_>>();
 
-                            println!("Submitting jito transaction... (attempt {})", i);
                             let mut bundle_id = String::new();
                             match send_jito_bundle(json!([bundle])).await {
                                 Ok(resp) => {
                                     bundle_id = resp.result.clone();
-                                    println!("Sent bundle resp: {:?}", bundle_id);
                                 }
                                 // Handle submit errors
                                 Err(err) => {
-                                    println!("Sent bundle err: {:?}", err);
+                                    info!("Sent bundle err: {:?}", err);
                                     time::sleep(Duration::from_secs(3)).await;
                                     continue;
                                 }
@@ -515,27 +520,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             let mut attempts = 0;
                             loop {
-                                println!("query bundle bundle_id: {}, attempts: {}", bundle_id, attempts);
+                                println!("\r查询bundle_id: {}, 尝试次数: {}", bundle_id, attempts);
+                                io::stdout().flush().unwrap(); // 确保输出被立即写入控制台
                                 // Retry
                                 let param = bundle_id.clone();
                                 match get_bundle_statuses(json!([[param]])).await {
                                     Ok(resp) => {
                                         if resp.result.value.len() > 0 && resp.result.value[0].confirmation_status == "confirmed" {
-                                            println!(" Bundle landed successfully");
-                                            println!(" https://solscan.io/tx/{}?cluster={}", resp.result.value[0].transactions[0], "mainnet");
+                                            info!("捆绑包成功提交");
                                             bundle_confirm = true;
                                             break;
                                         }
                                     }
                                     // Handle submit errors
                                     Err(err) => {
-                                        println!("{}", err);
+                                        info!("{}", err);
                                     }
                                 }
                                 attempts += 1;
                                 
                                 if attempts > 20 {
-                                    println!("{}: Max retries", "ERROR".bold().red());
+                                    info!("{}: 超过最大尝试次数", "ERROR".bold().red());
                                     if i == 2 {
                                         // 达到最大后重新分配避免卡死
                                         if let Ok(loaded_proof) = get_proof(&rpc_client, signer.pubkey()).await {
@@ -560,14 +565,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // 成功上链，执行状态更新和任务分发
                                 loop {
                                     if let Ok(loaded_proof) = get_proof(&rpc_client, signer.pubkey()).await {
-                                        if proof != loaded_proof {
-                                            info!("Got new proof.");
+                                        if proof != loaded_proof {            
                                             let balance = (loaded_proof.balance as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
-                                            info!("New balance: {}", balance);
+                                            info!("余额: {} ORE", balance);
                                             let rewards = loaded_proof.balance - proof.balance;
                                             let rewards = (rewards as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
-                                            info!("Earned: {} ORE", rewards);
-
+                                            info!("本次挖掘: {} ORE", rewards);
+                                            info!("开始新的证明");
                                             let _ = mine_success_sender.send(MessageInternalMineSuccess {
                                                 difficulty,
                                                 total_balance: balance,
@@ -791,7 +795,7 @@ async fn client_message_handler_system(
     while let Some(client_message) = receiver_channel.recv().await {
         match client_message {
             ClientMessage::Ready(addr) => {
-                println!("Client {} is ready!", addr.to_string());
+                
                 {
                     let shared_state = shared_state.read().await;
                     if let Some(sender) = shared_state.sockets.get(&addr) {
@@ -810,7 +814,6 @@ async fn client_message_handler_system(
                 println!("Client {} has started mining!", addr.to_string());
             }
             ClientMessage::BestSolution(addr, solution) => {
-                println!("Client {} found a solution.", addr);
                 let challenge = {
                     let proof = proof.lock().await;
                     proof.challenge
@@ -818,7 +821,7 @@ async fn client_message_handler_system(
 
                 if solution.is_valid(&challenge) {
                     let diff = solution.to_hash().difficulty();
-                    println!("{} found diff: {}", addr, diff);
+                    println!("{} 找到难度: {}", addr, diff);
                     if diff >= MIN_DIFF {
                         {
                             let mut best_hash = best_hash.lock().await;
@@ -831,13 +834,10 @@ async fn client_message_handler_system(
                         // calculate rewards
                         let hashpower = MIN_HASHPOWER * 2u64.pow(diff - MIN_DIFF);
 
-                        println!("Client: {}, provided {} Hashpower", addr, hashpower);
                     } else {
                         println!("Diff to low, skipping");
                     }
-                } else {
-                    println!("{} returned an invalid solution!", addr);
-                }
+                } 
             }
         }
     }
