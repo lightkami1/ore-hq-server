@@ -402,8 +402,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prio_fee = *app_prio_fee.lock().await; 
     let jito_tip_lamports = *priority_fee.lock().await;
     let jito_tip_sol = (jito_tip_lamports as f64) / 1_000_000_000.0; 
-    let keypair = read_keypair_file("/root/.config/solana/id1.json")
-        .expect("Failed to read keypair from /root/.config/solana/id1.json");
 
 
     tokio::spawn(async move {
@@ -511,13 +509,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 attempts += 1;
+                                
                                 if attempts > 20 {
                                     println!("{}: Max retries", "ERROR".bold().red());
+                                    if i == 2 {
+                                        // 达到最大后重新分配避免卡死
+                                        if let Ok(loaded_proof) = get_proof(&rpc_client, signer.pubkey()).await {
+                                            let mut mut_proof = app_proof.lock().await;
+                                            *mut_proof = loaded_proof;
+                                            let mut nonce = app_nonce.lock().await;
+                                            *nonce = 0;
+                                            let mut mut_best_hash = app_best_hash.lock().await;
+                                            mut_best_hash.solution = None;
+                                            mut_best_hash.difficulty = 0;
+                                        
+                                        }
+                                        break;
+                                    }
                                     break;
                                 }
+
                                 time::sleep(Duration::from_secs(1)).await;
                             }
-
                             
                             if bundle_confirm {
                                 // 成功上链，执行状态更新和任务分发
