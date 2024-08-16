@@ -200,6 +200,29 @@ async fn send_jito_bundle(params: Value) -> Result<BundleSendResponse> {
         .map_err(|err| eyre::eyre!("Failed to deserialize response: {err:#}, response: {text}, status: {status}"))
 }
 
+//高难度动态增加tip
+pub fn adjust_fee(difficulty: u32, jito_tip_lamports: u64) -> u64 {
+    let mut extra_fee = jito_tip_lamports.clone();
+
+    if difficulty > 25 {
+        // 对于 difficulty > 25 的特殊处理
+        extra_fee += ((extra_fee as f64 * (difficulty as f64 - 20f64) / 20f64) as u64) * 6;
+        // 约束下上限
+        if extra_fee > 5 * jito_tip_lamports {
+            extra_fee = 5 * jito_tip_lamports;
+        }
+        info!("TIP增加到 {}", extra_fee);
+    }
+        else if difficulty > 20 {
+            extra_fee += (extra_fee as f64 * (difficulty as f64 - 20f64) / 20f64) as u64 * 4;
+            // 约束下上限
+            if extra_fee > 3 * jito_tip_lamports {
+                extra_fee = 3 * jito_tip_lamports
+            }
+            info!("TIP增加到 {}", extra_fee);
+        }
+    return extra_fee;
+}
 
 #[derive(Parser, Debug)]
 #[command(version, author, about, long_about = None)]
@@ -430,18 +453,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let prio_fee_ix = ComputeBudgetInstruction::set_compute_unit_price(prio_fee);
                     ixs.push(prio_fee_ix);
 
-                    // 添加Jito tip转账指令
-                    ixs.push(build_bribe_ix(&app_wallet.pubkey(), jito_tip_lamports));
-
-                    
-                    println!("Jito tip: {} SOL", jito_tip_sol);
-
                     let noop_ix = get_auth_ix(signer.pubkey());
                     ixs.push(noop_ix);
 
                     // TODO: choose the highest balance bus
                     let bus = rand::thread_rng().gen_range(0..BUS_COUNT);
                     let difficulty = solution.to_hash().difficulty();
+
+                    // 添加Jito tip转账指令,难度>20增加小费
+                    ixs.push(build_bribe_ix(&app_wallet.pubkey(), adjust_fee(difficulty, jito_tip_lamports)));
+                    if difficulty < 2 {
+                        println!("Jito tip: {} SOL", jito_tip_sol);
+                    }
+                    
 
                     let ix_mine = get_mine_ix(signer.pubkey(), solution, bus);
                     ixs.push(ix_mine);
