@@ -2,14 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Write},
     net::SocketAddr,
-    ops::{ControlFlow, Div, Mul},
+    ops::ControlFlow,
     path::Path,
-    str::FromStr,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration
 };
 use colored::Colorize;
-use axum::{extract::{ws::{Message, WebSocket}, ConnectInfo, Query, State, WebSocketUpgrade}, http::StatusCode, response::IntoResponse, routing::get, Extension, Router};
+use axum::{extract::{ws::{Message, WebSocket}, ConnectInfo, State, WebSocketUpgrade}, http::StatusCode, response::IntoResponse, routing::get, Extension, Router};
 use axum_extra::{headers::authorization::Basic, TypedHeader};
 use clap::Parser;
 use drillx::Solution;
@@ -17,26 +16,19 @@ use futures::{stream::SplitSink, SinkExt, StreamExt};
 use ore_api::{consts::BUS_COUNT, state::Proof};
 use ore_utils::{get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, ORE_TOKEN_DECIMALS};
 use serde::{Deserialize, Serialize};
-use rand::{Rng, seq::SliceRandom};
+use rand::Rng;
 use solana_client::{
     client_error::reqwest::{self, header::{CONTENT_TYPE, HeaderMap}},
     nonblocking::rpc_client::RpcClient,
 };
-use solana_sdk::{commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, native_token::LAMPORTS_PER_SOL, pubkey, pubkey::Pubkey, signature::{read_keypair_file, Signature}, signer::Signer, transaction::Transaction};
-use solana_transaction_status::{Encodable, EncodedTransaction, TransactionConfirmationStatus, UiTransactionEncoding};
-use solana_program::{
-    instruction::Instruction,
-    native_token::{lamports_to_sol, sol_to_lamports},
-    system_instruction::transfer,
-};
-use tokio::{io::AsyncReadExt, sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock}, time};
+use solana_sdk::{commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, native_token::LAMPORTS_PER_SOL, pubkey, pubkey::Pubkey, signature::read_keypair_file, signer::Signer, transaction::Transaction};
+use solana_transaction_status::{Encodable, EncodedTransaction, UiTransactionEncoding};
+use tokio::{sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock}, time};
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use serde_json::{json, Value};
-use eyre::{Report, Result};
-
-
+use eyre::Result;
 
 const MIN_DIFF: u32 = 8;
 const MIN_HASHPOWER: u64 = 5;
@@ -430,7 +422,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_wallet = wallet_extension.clone();
     let app_nonce = nonce_ext.clone();
     let app_prio_fee = Arc::new(Mutex::new(0)); 
-    let prio_fee = *app_prio_fee.lock().await; 
     let jito_tip_lamports = *priority_fee.lock().await;
     let jito_tip_sol = (jito_tip_lamports as f64) / 1_000_000_000.0; 
 
@@ -830,9 +821,6 @@ async fn client_message_handler_system(
                                 best_hash.solution = Some(solution);
                             }
                         }
-
-                        // calculate rewards
-                        let hashpower = MIN_HASHPOWER * 2u64.pow(diff - MIN_DIFF);
 
                     } else {
                         println!("Diff to low, skipping");
